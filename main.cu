@@ -222,8 +222,7 @@ int main() {
     print_result(res, -1, {"null"});
   }
 
-  for (size_t c = 
-  for (size_t n = 128; n <= n_element; n *= 2) {
+  for (const auto& p: benchmark_range({128, 8, 8}, {128, 512, 512})) {
     {
       auto res = bench_kernels(kernels::empty, n);
       print_result(res, n, {"kernel", "empty"});
