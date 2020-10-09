@@ -5,5 +5,6 @@ project(cuda-graphs-ubench
   LANGUAGES CUDA CXX)
 
 set (CMAKE_CXX_STANDARD 17)
+set (CMAKE_CUDA_STANDARD 14)
 
-add_executable(benchmark main.cpp kernels.cu)
+add_executable(benchmark main.cu)
