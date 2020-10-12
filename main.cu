@@ -13,27 +13,12 @@ constexpr size_t n_block    = 64;
 constexpr size_t n_thread   = 128;
 constexpr size_t n_iter     = 5;
 constexpr size_t n_rep      = 10;
-constexpr size_t n_element  = 65336;
-
-
-struct benchmark_parameters {
- size_t n_epoch;
- size_t n_serial;
- size_t n_parallel;
-};
-
-struct benchmark_range {
-  benchmark_parameters from, to, current;
-  benchmark_parameters& operator*() {
-    return current;
-  }
-
-  benchmark_range& operator++() {
-    current.n_serial *= 2;
-    current.n_parallel *= 2;
-    return *this;
-  }
-};
+constexpr size_t n_element_lo  =   512;
+constexpr size_t n_element_hi  = 65536;
+constexpr size_t n_epoch_lo = 128;
+constexpr size_t n_epoch_hi = 128;
+constexpr size_t n_chunk_lo = 32;
+constexpr size_t n_chunk_hi = 512;
 
 using timer = std::chrono::high_resolution_clock;
 using nsecs = std::chrono::microseconds;
@@ -73,11 +58,17 @@ using result = std::vector<double>;
     }									\
   } while (0)
 
-void print_result(result& res, size_t n, const std::vector<std::string> tags) {
-  for (const auto& t: tags) std::cout << t << " ";    
-  std::cout << "," << n << ",";    
+void print_result(result& res, 
+		  size_t epoch, size_t chunk, size_t element, 
+		  const std::string& kind, const std::string& kernel) {
+  std::cout << kind    << "," 
+	    << kernel  << ","
+	    << epoch   << ","
+	    << chunk   << ","
+	    << element << ",";
   for (const auto& r: res)  std::cout << r << ",";    
-  std::cout << '\n';				
+  std::cout << std::endl;
+  std::cout.flush();
 }						
 
 auto bench_null() {
@@ -94,16 +85,16 @@ auto bench_null() {
 }
 
 template<typename K, typename... As>
-auto bench_kernels(const benchmark_parameters& p, K kernel, As... as) {
+auto bench_kernels(const std::string& tag, size_t n_epoch, size_t n_chunk, size_t n_element, K kernel, As... as) {
   result res;
   for (auto rep = 0; rep < n_rep; ++rep) {
     auto t0 = timer::now();
     cuda_api("pre-sync", cudaDeviceSynchronize);
-    for (auto epoch = 0ul; epoch < p.n_epoch; ++epoch) {
-      for (auto serial = 0ul; serial < p.n_serial; ++serial) {
+    for (auto epoch = 0ul; epoch < n_epoch; ++epoch) {
+      for (auto serial = 0ul; serial < n_chunk; ++serial) {
 	kernel<<<n_thread, n_block>>>(as...);
       }
-      for (auto parallel = 0ul; parallel < p.n_parallel; ++parallel) {
+      for (auto parallel = 0ul; parallel < n_chunk; ++parallel) {
 	kernel<<<n_thread, n_block>>>(as...);
       }
     }
@@ -112,7 +103,7 @@ auto bench_kernels(const benchmark_parameters& p, K kernel, As... as) {
     auto dt = (t1 - t0).count();
     res.push_back(dt);
   }
-  return res;
+  print_result(res, n_epoch, n_chunk, n_element, tag, "kernels");
 }
 
 cudaGraphNode_t add_empty_node(cudaGraph_t& graph) {
@@ -164,7 +155,7 @@ void add_dependencies(cudaGraph_t& graph, const std::vector<cudaGraphNode_t>& fr
 }
 
 template<typename K, typename... As>
-auto bench_graph(const benchmark_parameters& p, K kernel, As... as) {
+auto bench_graph(const std::string& tag, size_t n_epoch, size_t n_chunk, size_t n_element, K kernel, As... as) {
   cudaStream_t    stream   = {0};
   cudaGraph_t     graph    = {0};
   cudaGraphExec_t instance = {0};
@@ -179,14 +170,14 @@ auto bench_graph(const benchmark_parameters& p, K kernel, As... as) {
   auto root = add_empty_node(graph);
   auto last = root;
 
-  for (auto epoch = 0ul; epoch < p.n_epoch; ++epoch) {
-    for (auto serial = 0ul; serial < p.n_serial; ++serial) {
+  for (auto epoch = 0ul; epoch < n_epoch; ++epoch) {
+    for (auto serial = 0ul; serial < n_chunk; ++serial) {
       auto node = add_kernel_node(graph, kernel, args);
       add_dependencies(graph, last, node);
       last = node;
     }
     std::vector<cudaGraphNode_t> nodes;
-    for (auto parallel = 0ul; parallel < p.n_parallel; ++parallel) {
+    for (auto parallel = 0ul; parallel < n_chunk; ++parallel) {
       auto node = add_kernel_node(graph, kernel, args);
       nodes.push_back(std::move(node));
     }
@@ -206,7 +197,7 @@ auto bench_graph(const benchmark_parameters& p, K kernel, As... as) {
     auto dt = (t1 - t0).count();
     res.push_back(dt);
   }
-  return res;
+  print_result(res, n_epoch, n_chunk, n_element, tag, "graphs");
 }
 
 int main() {
@@ -214,38 +205,19 @@ int main() {
   double* y;
   double alpha;
 
-  cuda_api("alloc x", cudaMalloc, &x, n_element);
-  cuda_api("alloc y", cudaMalloc, &y, n_element);
+  cuda_api("malloc x", cudaMalloc, &x, n_element_hi);
+  cuda_api("malloc y", cudaMalloc, &y, n_element_hi);
 
-  {
-    auto res = bench_null();
-    print_result(res, -1, {"null"});
-  }
-
-  for (const auto& p: benchmark_range({128, 8, 8}, {128, 512, 512})) {
-    {
-      auto res = bench_kernels(kernels::empty, n);
-      print_result(res, n, {"kernel", "empty"});
-    }
-    {
-      auto res = bench_kernels(kernels::axpy, y, x, alpha, n);
-      print_result(res, n, {"kernel", "axpy"});
-    }
-    {
-      auto res = bench_kernels(kernels::newton, n_iter, x, n);
-      print_result(res, n, {"kernel", "newton"});
-    }
-    {
-      auto res = bench_graph(kernels::empty, n);
-      print_result(res, n, {"graph", "empty"});
-    }
-    {
-      auto res = bench_graph(kernels::axpy, y, x, alpha, n);
-      print_result(res, n, {"graph", "axpy"});
-    }
-    {
-      auto res = bench_graph(kernels::newton, n_iter, x, n);
-      print_result(res, n, {"graph", "newton"});
+  for (auto n_epoch = n_epoch_lo; n_epoch <= n_epoch_hi; n_epoch *= 2) {
+    for (auto n_chunk = n_chunk_lo; n_chunk <= n_chunk_hi; n_chunk *= 2) {
+      for (auto n_element = n_element_lo; n_element <= n_element_hi; n_element *= 2) {
+	bench_kernels("empty",  n_epoch, n_chunk, n_element, kernels::empty, n_element);
+	bench_kernels("axpy",   n_epoch, n_chunk, n_element, kernels::axpy, y, x, alpha, n_element);
+	bench_kernels("newton", n_epoch, n_chunk, n_element, kernels::newton, n_iter, x, n_element);
+	bench_graph("empty",    n_epoch, n_chunk, n_element, kernels::empty, n_element);
+	bench_graph("axpy",     n_epoch, n_chunk, n_element, kernels::axpy, y, x, alpha, n_element);
+	bench_graph("newton",   n_epoch, n_chunk, n_element, kernels::newton, n_iter, x, n_element);
+      }
     }
   }
 }
