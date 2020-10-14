@@ -104,10 +104,10 @@ auto bench_kernels(const std::string& tag, size_t n_epoch, size_t n_serial, size
     cuda_api(cudaDeviceSynchronize);
     for (auto epoch = 0ul; epoch < n_epoch; ++epoch) {
       for (auto serial = 0ul; serial < n_serial; ++serial) {
-	kernel<<<n_thread, n_block>>>(as...);
+	kernel<<<n_block, n_thread>>>(as...);
       }
       for (auto parallel = 0ul; parallel < n_parallel; ++parallel) {
-	kernel<<<n_thread, n_block>>>(as...);
+	kernel<<<n_block, n_thread>>>(as...);
       }
     }
     cuda_api(cudaDeviceSynchronize);
@@ -322,8 +322,8 @@ int main() {
   double* y;
   double alpha;
 
-  cuda_api(cudaMalloc, &x, n_element_hi);
-  cuda_api(cudaMalloc, &y, n_element_hi);
+  cuda_api(cudaMalloc, &x, n_element_hi*sizeof(double));
+  cuda_api(cudaMalloc, &y, n_element_hi*sizeof(double));
 
   print_header();
   for (auto n_epoch = n_epoch_lo; n_epoch <= n_epoch_hi; n_epoch *= 2) {
