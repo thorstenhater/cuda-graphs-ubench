@@ -245,6 +245,7 @@ auto bench_graph_update(const std::string& tag, size_t n_epoch, size_t n_serial,
     cudaGraphNode_t error_node;
     cudaGraphExecUpdateResult update_result; 
     cuda_api(cudaGraphExecUpdate, instance, update, &error_node, &update_result); 
+    cuda_api(cudaGraphDestroy, update);
     auto t0 = timer::now();
     cuda_api(cudaDeviceSynchronize);
     cuda_api(cudaGraphLaunch, instance, stream);
@@ -302,6 +303,7 @@ auto bench_graph_split_update(const std::string& tag, size_t n_epoch, size_t n_s
       cudaGraphNode_t error_node;
       cudaGraphExecUpdateResult update_result; 
       cuda_api(cudaGraphExecUpdate, instance, update, &error_node, &update_result); 
+      cuda_api(cudaGraphDestroy, update);
       cuda_api(cudaGraphLaunch, instance, stream);
     }
     cuda_api(cudaDeviceSynchronize);
