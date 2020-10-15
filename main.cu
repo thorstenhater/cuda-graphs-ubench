@@ -9,17 +9,16 @@
 #include <cuda.h>
 #include <cuda_runtime_api.h>
 
-constexpr size_t n_block	=    64;
-constexpr size_t n_thread	=   128;
-constexpr size_t n_rep		=    10;
-constexpr size_t n_element_lo	=   512;
-constexpr size_t n_element_hi	= 32768;
-constexpr size_t n_epoch_lo	=    64;
-constexpr size_t n_epoch_hi	=    64;
-constexpr size_t n_serial_lo	=    32;
-constexpr size_t n_serial_hi	=    32;
-constexpr size_t n_parallel_lo	=     8;
-constexpr size_t n_parallel_hi	=   128;
+constexpr size_t n_thread	=    128;
+constexpr size_t n_rep		=     10;
+constexpr size_t n_element_lo	=    512;
+constexpr size_t n_element_hi	= 131072;
+constexpr size_t n_epoch_lo	=     32;
+constexpr size_t n_epoch_hi	=     32;
+constexpr size_t n_serial_lo	=     16;
+constexpr size_t n_serial_hi	=     16;
+constexpr size_t n_parallel_lo	=      8;
+constexpr size_t n_parallel_hi	=    128;
 
 using timer = std::chrono::high_resolution_clock;
 using nsecs = std::chrono::microseconds;
@@ -99,6 +98,7 @@ auto bench_null() {
 template<typename K, typename... As>
 auto bench_kernels(const std::string& tag, size_t n_epoch, size_t n_serial, size_t n_parallel, size_t n_element, K kernel, As... as) {
   result res;
+  auto n_block = (n_element + n_thread - 1)/n_thread;
   for (auto rep = 0; rep < n_rep; ++rep) {
     auto t0 = timer::now();
     cuda_api(cudaDeviceSynchronize);
@@ -125,7 +125,7 @@ cudaGraphNode_t add_empty_node(cudaGraph_t& graph) {
 }
 
 template<class K>
-cudaGraphNode_t add_kernel_node(cudaGraph_t& graph, K kernel, const std::vector<void*> args) {
+cudaGraphNode_t add_kernel_node(cudaGraph_t& graph, size_t n_block, K kernel, const std::vector<void*> args) {
   cudaGraphNode_t node = {0};
   cudaKernelNodeParams params = {0};
   params.func           = (void*) kernel;
@@ -144,7 +144,7 @@ template<int N, int ix, typename... Ts>
 constexpr void set_args(std::unique_ptr<std::tuple<Ts...>>& values, std::vector<void*>& pointers) {
   if constexpr(ix >= N) {
       return;
-    } else {
+  } else {
     pointers[ix] = &std::get<ix>(*values);
     set_args<N, ix + 1, Ts...>(values, pointers);
   }
@@ -168,7 +168,7 @@ void add_dependencies(cudaGraph_t& graph, const std::vector<cudaGraphNode_t>& fr
 
 
 template<typename K, typename... As>
-auto make_graph(size_t n_epoch, size_t n_serial, size_t n_parallel, K kernel, As... as) {
+auto make_graph(size_t n_epoch, size_t n_serial, size_t n_parallel, size_t n_element, K kernel, As... as) {
   std::vector<void*> args(sizeof...(As), nullptr);
   auto tmp = std::make_unique<std::tuple<As...>>(as...);
   set_args<sizeof...(As), 0, As...>(tmp, args);
@@ -181,17 +181,18 @@ auto make_graph(size_t n_epoch, size_t n_serial, size_t n_parallel, K kernel, As
   auto last = root;
 
   std::vector<cudaGraphNode_t> to_destroy;
+  auto n_block = (n_element + n_thread - 1)/n_thread;
 
   for (auto epoch = 0ul; epoch < n_epoch; ++epoch) {
     for (auto serial = 0ul; serial < n_serial; ++serial) {
-      auto node = add_kernel_node(graph, kernel, args);
+      auto node = add_kernel_node(graph, n_block, kernel, args);
       add_dependencies(graph, last, node);
       last = node;
       to_destroy.push_back(node);
     }
     std::vector<cudaGraphNode_t> nodes;
     for (auto parallel = 0ul; parallel < n_parallel; ++parallel) {
-      auto node = add_kernel_node(graph, kernel, args);
+      auto node = add_kernel_node(graph, n_block, kernel, args);
       to_destroy.push_back(node);
       nodes.push_back(std::move(node));
     }
@@ -210,7 +211,7 @@ auto make_graph(size_t n_epoch, size_t n_serial, size_t n_parallel, K kernel, As
 
 template<typename K, typename... As>
 auto bench_graph(const std::string& tag, size_t n_epoch, size_t n_serial, size_t n_parallel, size_t n_element, K kernel, As... as) {
-  auto graph = make_graph(n_epoch, n_serial, n_parallel, kernel, as...);
+  auto graph = make_graph(n_epoch, n_serial, n_parallel, n_element, kernel, as...);
   cudaStream_t stream   = {0};
   cuda_api(cudaStreamCreate, &stream);
   cudaGraphExec_t instance = {0};
@@ -234,14 +235,14 @@ auto bench_graph(const std::string& tag, size_t n_epoch, size_t n_serial, size_t
 
 template<typename K, typename... As>
 auto bench_graph_update(const std::string& tag, size_t n_epoch, size_t n_serial, size_t n_parallel, size_t n_element, K kernel, As... as) {
-  auto graph = make_graph(n_epoch, n_serial, n_parallel, kernel, as...);
+  auto graph = make_graph(n_epoch, n_serial, n_parallel, n_element, kernel, as...);
   cudaStream_t stream   = {0};
   cuda_api(cudaStreamCreate, &stream);
   cudaGraphExec_t instance = {0};
   cuda_api(cudaGraphInstantiate, &instance, graph, nullptr, nullptr, 0);
   result res;
   for (auto rep = 0; rep < n_rep; ++rep) {
-    auto update = make_graph(n_epoch, n_serial, n_parallel, kernel, as...);
+    auto update = make_graph(n_epoch, n_serial, n_parallel, n_element, kernel, as...);
     cudaGraphNode_t error_node;
     cudaGraphExecUpdateResult update_result; 
     cuda_api(cudaGraphExecUpdate, instance, update, &error_node, &update_result); 
@@ -263,7 +264,7 @@ auto bench_graph_update(const std::string& tag, size_t n_epoch, size_t n_serial,
 
 template<typename K, typename... As>
 auto bench_graph_split(const std::string& tag, size_t n_epoch, size_t n_serial, size_t n_parallel, size_t n_element, K kernel, As... as) {
-  auto graph = make_graph(1, n_serial, n_parallel, kernel, as...);
+  auto graph = make_graph(1, n_serial, n_parallel, n_element, kernel, as...);
   cudaStream_t stream   = {0};
   cuda_api(cudaStreamCreate, &stream);
   cudaGraphExec_t instance = {0};
@@ -289,7 +290,7 @@ auto bench_graph_split(const std::string& tag, size_t n_epoch, size_t n_serial, 
 
 template<typename K, typename... As>
 auto bench_graph_split_update(const std::string& tag, size_t n_epoch, size_t n_serial, size_t n_parallel, size_t n_element, K kernel, As... as) {
-  auto graph = make_graph(1, n_serial, n_parallel, kernel, as...);
+  auto graph = make_graph(1, n_serial, n_parallel, n_element, kernel, as...);
   cudaStream_t stream   = {0};
   cuda_api(cudaStreamCreate, &stream);
   cudaGraphExec_t instance = {0};
@@ -299,7 +300,7 @@ auto bench_graph_split_update(const std::string& tag, size_t n_epoch, size_t n_s
     auto t0 = timer::now();
     cuda_api(cudaDeviceSynchronize);
     for (auto epoch = 0ul; epoch < n_epoch; ++epoch) {
-      auto update = make_graph(1, n_serial, n_parallel, kernel, as...);
+      auto update = make_graph(1, n_serial, n_parallel, n_element, kernel, as...);
       cudaGraphNode_t error_node;
       cudaGraphExecUpdateResult update_result; 
       cuda_api(cudaGraphExecUpdate, instance, update, &error_node, &update_result); 
